@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: docmind
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: CORS_ALLOW_ALL
+        value: "true"

@@ -1,0 +1,9 @@
+venv
+__pycache__
+*.pyc
+node_modules
+.git
+.env
+frontend/dist
+backend/data
+**/.vite
