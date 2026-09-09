@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+import auth
 import rag
 
 app = FastAPI(title="DocMind API", version="0.1.0")
@@ -33,18 +34,41 @@ class AskRequest(BaseModel):
     question: str
 
 
+class GoogleLoginRequest(BaseModel):
+    credential: str
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
+@app.get("/auth/config")
+def auth_config():
+    return {
+        "demo": auth.is_demo(),
+        "googleClientId": auth.google_client_id() or None,
+    }
+
+
+@app.post("/auth/google")
+def auth_google(req: GoogleLoginRequest):
+    token, email = auth.login_with_google(req.credential)
+    return {"token": token, "username": email}
+
+
+@app.get("/auth/me")
+def auth_me(user: str = Depends(auth.current_user)):
+    return {"username": user, "demo": auth.is_demo()}
+
+
 @app.get("/documents")
-def get_documents():
+def get_documents(_: str = Depends(auth.current_user)):
     return [asdict(d) for d in rag.list_documents()]
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...), _: str = Depends(auth.current_user)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported right now.")
     pdf_bytes = await file.read()
@@ -56,7 +80,7 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: str):
+def delete_document(doc_id: str, _: str = Depends(auth.current_user)):
     try:
         rag.delete_document(doc_id)
     except ValueError as e:
@@ -65,7 +89,7 @@ def delete_document(doc_id: str):
 
 
 @app.post("/ask")
-def ask(req: AskRequest):
+def ask(req: AskRequest, _: str = Depends(auth.current_user)):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
     try:

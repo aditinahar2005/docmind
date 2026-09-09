@@ -13,3 +13,9 @@ services:
         value: openai/gpt-oss-20b
       - key: CORS_ALLOW_ALL
         value: "true"
+      - key: DEMO_MODE
+        value: "true"
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: AUTH_SECRET
+        sync: false

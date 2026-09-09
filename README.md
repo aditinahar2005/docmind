@@ -75,10 +75,31 @@ Vercel-style function.
 | Method | Path | |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness |
+| `GET` | `/auth/config` | `{ demo, googleClientId }` |
+| `POST` | `/auth/google` | Google Identity credential → app JWT |
 | `GET` | `/documents` | Indexed docs |
 | `POST` | `/upload` | `multipart/form-data` field `file` (PDF) |
 | `DELETE` | `/documents/{id}` | Drop a doc and rebuild the index from remaining chunks |
 | `POST` | `/ask` | `{ "question": "..." }` → `{ answer, sources[] }` |
+
+Document/ask routes require a JWT when `DEMO_MODE=false`. In demo mode they
+are open.
+
+## Access
+
+`DEMO_MODE=true` (default): the app is open. Visitors can use it with no
+account. Google Sign-In is optional if `GOOGLE_CLIENT_ID` is set.
+
+`DEMO_MODE=false`: Google Sign-In is required. Create an OAuth client in
+[Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+(type **Web application**). Add authorized JavaScript origins:
+
+- `http://localhost:5173`
+- `http://127.0.0.1:5173`
+- your Render URL, e.g. `https://docmind-xxxx.onrender.com`
+
+Put the client ID in `GOOGLE_CLIENT_ID` and a random string in `AUTH_SECRET`.
+Do not commit the client secret; GIS uses the client ID only on the frontend.
 
 ## Limitations
 
@@ -141,8 +162,8 @@ docker run -p 8000:8000 -e LLM_PROVIDER=groq -e GROQ_API_KEY=gsk_... docmind
 ```
 
 [`render.yaml`](render.yaml) targets Render’s free plan. Set `GROQ_API_KEY`
-in the dashboard. Free instances sleep after idle; the first request after
-sleep is slow.
+in the dashboard. Keep `DEMO_MODE=true` for an open demo. Free instances
+sleep after idle; the first request after sleep is slow.
 
 ## Layout
 

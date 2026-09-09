@@ -9,3 +9,5 @@ faiss-cpu>=1.15.0
 numpy>=2.0.0
 pydantic>=2.9.0
 python-dotenv>=1.0.1
+PyJWT>=2.9.0
+google-auth>=2.35.0

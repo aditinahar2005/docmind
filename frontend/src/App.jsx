@@ -1,12 +1,111 @@
 import { useEffect, useRef, useState } from 'react'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+const TOKEN_KEY = 'docmind.token'
+
+function getToken() {
+  return sessionStorage.getItem(TOKEN_KEY) || ''
+}
+
+function apiFetch(path, options = {}) {
+  const headers = { ...(options.headers || {}) }
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  return fetch(`${API_BASE}${path}`, { ...options, headers })
+}
+
+function GoogleSignIn({ clientId, onLoggedIn }) {
+  const slot = useRef(null)
+  const onLoggedInRef = useRef(onLoggedIn)
+  const [error, setError] = useState(null)
+  onLoggedInRef.current = onLoggedIn
+
+  useEffect(() => {
+    if (!clientId) return undefined
+    let cancelled = false
+
+    const mount = () => {
+      if (cancelled || !slot.current || !window.google?.accounts?.id) return
+      slot.current.innerHTML = ''
+      window.google.accounts.id.initialize({
+        client_id: clientId,
+        callback: async (response) => {
+          try {
+            const res = await fetch(`${API_BASE}/auth/google`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ credential: response.credential }),
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.detail || 'Google sign-in failed')
+            sessionStorage.setItem(TOKEN_KEY, data.token)
+            onLoggedInRef.current(data.username)
+          } catch (err) {
+            setError(err.message)
+          }
+        },
+      })
+      window.google.accounts.id.renderButton(slot.current, {
+        theme: 'outline',
+        size: 'large',
+        text: 'signin_with',
+        width: 280,
+      })
+    }
+
+    if (window.google?.accounts?.id) {
+      mount()
+      return () => {
+        cancelled = true
+      }
+    }
+    const timer = setInterval(() => {
+      if (window.google?.accounts?.id) {
+        clearInterval(timer)
+        mount()
+      }
+    }, 200)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [clientId])
+
+  if (!clientId) return null
+
+  return (
+    <div>
+      <div ref={slot} className="google-btn" />
+      {error && <p className="upload-error">{error}</p>}
+    </div>
+  )
+}
+
+function LoginScreen({ clientId, demo, onLoggedIn, onGuest }) {
+  return (
+    <div className="login-page">
+      <div className="login-card">
+        <span className="brand-mark">DM</span>
+        <h1>DocMind</h1>
+        <p className="muted">
+          {demo ? 'Sign in with Google, or continue as a guest.' : 'Sign in with Google to upload and ask.'}
+        </p>
+        <GoogleSignIn clientId={clientId} onLoggedIn={onLoggedIn} />
+        {demo && (
+          <button type="button" className="guest-btn" onClick={onGuest}>
+            Continue without signing in
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function useDocuments() {
   const [documents, setDocuments] = useState([])
 
   const refresh = async () => {
-    const res = await fetch(`${API_BASE}/documents`)
+    const res = await apiFetch('/documents')
     if (res.ok) setDocuments(await res.json())
   }
 
@@ -30,7 +129,7 @@ function UploadZone({ onUploaded }) {
     const form = new FormData()
     form.append('file', file)
     try {
-      const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: form })
+      const res = await apiFetch('/upload', { method: 'POST', body: form })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.detail || 'Upload failed')
@@ -74,7 +173,7 @@ function UploadZone({ onUploaded }) {
 
 function CaseFile({ documents, onRemoved }) {
   const remove = async (id) => {
-    await fetch(`${API_BASE}/documents/${id}`, { method: 'DELETE' })
+    await apiFetch(`/documents/${id}`, { method: 'DELETE' })
     await onRemoved()
   }
 
@@ -190,6 +289,77 @@ function AnswerBlock({ entry }) {
 }
 
 export default function App() {
+  const [gate, setGate] = useState('loading')
+  const [demo, setDemo] = useState(true)
+  const [googleClientId, setGoogleClientId] = useState('')
+  const [user, setUser] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/config`)
+        const data = await res.json()
+        if (cancelled) return
+        setDemo(Boolean(data.demo))
+        setGoogleClientId(data.googleClientId || '')
+        if (data.demo) {
+          const me = getToken() ? await apiFetch('/auth/me') : null
+          if (me?.ok) {
+            const body = await me.json()
+            setUser(body.username === 'demo' ? null : body.username)
+          }
+          setGate('app')
+          return
+        }
+        const me = await apiFetch('/auth/me')
+        if (me.ok) {
+          const body = await me.json()
+          setUser(body.username)
+          setGate('app')
+        } else {
+          setGate('login')
+        }
+      } catch {
+        if (!cancelled) setGate('app')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (gate === 'loading') return <div className="login-page muted">Loading…</div>
+  if (gate === 'login') {
+    return (
+      <LoginScreen
+        clientId={googleClientId}
+        demo={demo}
+        onLoggedIn={(email) => {
+          setUser(email)
+          setGate('app')
+        }}
+        onGuest={() => setGate('app')}
+      />
+    )
+  }
+
+  return (
+    <Workspace
+      demo={demo}
+      user={user}
+      googleClientId={googleClientId}
+      onSignedIn={(email) => setUser(email)}
+      onSignOut={() => {
+        sessionStorage.removeItem(TOKEN_KEY)
+        setUser(null)
+        setGate(demo ? 'app' : 'login')
+      }}
+    />
+  )
+}
+
+function Workspace({ demo, user, googleClientId, onSignedIn, onSignOut }) {
   const { documents, refresh } = useDocuments()
   const [thread, setThread] = useState([])
   const [question, setQuestion] = useState('')
@@ -207,7 +377,7 @@ export default function App() {
     setQuestion('')
     setAsking(true)
     try {
-      const res = await fetch(`${API_BASE}/ask`, {
+      const res = await apiFetch('/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: q }),
@@ -236,6 +406,15 @@ export default function App() {
         <CaseFile documents={documents} onRemoved={refresh} />
         <div className="stack-note mono">
           MiniLM embeddings → FAISS + BM25 (RRF) → Groq
+          {demo && !user && <p className="demo-flag">Open demo — no account required</p>}
+          {user && <p className="demo-flag">Signed in as {user}</p>}
+          {user ? (
+            <button type="button" className="text-btn" onClick={onSignOut}>
+              Sign out
+            </button>
+          ) : (
+            googleClientId && <GoogleSignIn clientId={googleClientId} onLoggedIn={onSignedIn} />
+          )}
         </div>
       </aside>
 
