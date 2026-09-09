@@ -1,87 +1,111 @@
 # DocMind
 
-Sourced Q&A over PDFs. Upload a document, ask a question, get an answer with
-clickable citations back to the exact page.
+RAG over PDFs: ingest → embed → retrieve → generate, with page-level citations.
 
-A **RAG (retrieval-augmented generation)** demo: React + FastAPI, local
-embeddings, hybrid search (FAISS + BM25), Groq for generation. Built to mirror
-how production GenAI systems are wired on Azure.
+Upload a text PDF, ask a question, get an answer grounded in retrieved chunks.
+The UI turns `[Source N]` into clickable tabs that show the source passage and
+page. Stack: React, FastAPI, FastEmbed (ONNX MiniLM), FAISS, BM25, Groq (or
+OpenAI).
 
-<br>
-
-## Resume one-liner
-
-> Built a RAG Q&A app over PDFs: chunking, MiniLM embeddings, hybrid retrieval
-> (FAISS vector search + BM25, fused with Reciprocal Rank Fusion), and an LLM
-> that cites sources by page. React + FastAPI. Mapped 1:1 to Azure OpenAI +
-> Azure AI Search.
-
-Skills this shows: **RAG, embeddings, vector search, hybrid retrieval, FastAPI,
-React, prompt design, citations / grounding.**
-
-<br>
-
-## Why this architecture
-
-Every piece is a stand-in for a managed Azure service. The retrieve → prompt →
-generate loop in `backend/rag.py` would not change if you swapped the left
-column for the right — only the four classes for ingest, embed, store, and
-generate would.
-
-| This project (runs locally / cheap)    | Production equivalent                  |
-|----------------------------------------|----------------------------------------|
-| `pypdf` text extraction                | Azure AI Document Intelligence         |
-| FastEmbed ONNX (MiniLM)                | Azure OpenAI `text-embedding-3-*`      |
-| FAISS + BM25, fused with RRF           | Azure AI Search hybrid retrieval       |
-| Groq (or OpenAI) chat API              | Azure OpenAI GPT-4o                    |
-| FAISS index + JSON on disk             | Azure SQL / Cosmos DB + Search index   |
-
-That mapping is the interview story: this is not “I called ChatGPT on a PDF.”
-It is ingest → index → retrieve → generate, with grounding.
-
-<br>
-
-## Pipeline
+## Architecture
 
 ```
- PDF
-  │
-  ▼
- extract text (pypdf)  →  ~800-char overlapping chunks
-  │
-  ▼
- MiniLM embeddings  →  FAISS IndexFlatIP (cosine via inner product)
-  │
-  ├─ vector search (semantic)
-  └─ BM25 (keyword / names / error codes)
-           │
-           ▼
-    Reciprocal Rank Fusion (k=60)  →  top chunks
-           │
-           ▼
-    Groq LLM answers with [Source N] citations
-           │
-           ▼
-    React UI: answer + clickable source tabs
+PDF ── pypdf ── overlapping chunks (~800 chars, 150 overlap)
+                    │
+                    ▼
+              MiniLM embeddings (384-d, L2-normalized)
+                    │
+                    ▼
+              FAISS IndexFlatIP          BM25 over the same chunks
+                    │                              │
+                    └──────── RRF (k = 60) ────────┘
+                                    │
+                                    ▼
+                           top-k chunks in the prompt
+                                    │
+                                    ▼
+                           Groq / OpenAI  →  cited answer
 ```
 
-<br>
+Core logic lives in [`backend/rag.py`](backend/rag.py). HTTP surface is
+[`backend/main.py`](backend/main.py).
 
-## Setup (local)
+| Stage | Implementation | Notes |
+| --- | --- | --- |
+| Extract | `pypdf` | Text layer only; scanned/image PDFs fail closed |
+| Chunk | Character windows, overlap 150 | Page number kept on each chunk |
+| Embed | FastEmbed `all-MiniLM-L6-v2` (ONNX) | Same model family as sentence-transformers MiniLM; no PyTorch at runtime |
+| Vector index | FAISS `IndexFlatIP` | Cosine via inner product on normalized vectors; exact search |
+| Lexical | Okapi BM25 | Catches identifiers / names embeddings miss |
+| Fuse | Reciprocal Rank Fusion, `k=60` | Same combiner Azure AI Search uses for hybrid rank |
+| Generate | Groq `openai/gpt-oss-20b` (default) or OpenAI | Prompt forbids answering outside the sources |
+| Persist | `backend/data/index.faiss` + `meta.json` | Survives local process restart |
 
-Python 3.12+, Node 18+, and a Groq key (free, no card):
-[console.groq.com/keys](https://console.groq.com/keys).
+The retrieve → prompt → generate loop does not depend on Groq vs Azure OpenAI
+vs Azure AI Search. Swapping those is a storage/client change, not a pipeline
+rewrite.
+
+## Design choices
+
+**Hybrid retrieval.** Dense search fails on rare tokens (error codes, proper
+names). BM25 fails on paraphrase. RRF merges ranked lists without calibrating
+score scales.
+
+**Exact FAISS (`IndexFlatIP`), not HNSW.** The working set is a handful of
+PDFs. Exact search is simpler to reason about and avoids ANN recall as a
+variable in a demo. HNSW (or a hosted vector DB) is the next step at scale.
+
+**ONNX embeddings instead of PyTorch.** MiniLM is ~90MB. FastEmbed keeps the
+same 384-d space with a much smaller RAM footprint so a 512MB host is
+plausible. Vectors are L2-normalized before `IndexFlatIP`.
+
+**Grounding in the prompt, citations in the UI.** The model is instructed to
+cite `[Source N]` matching the numbered context block. The API also returns
+the retrieved snippets so the UI can show evidence even if the model
+under-cites. Citation markers are normalized (including U+202F) before
+render.
+
+**In-process index.** One FastAPI worker owns the FAISS index. That is
+correct for a single-node demo and incorrect for serverless (cold instances
+do not share memory or disk). Deploy as a long-lived container, not a
+Vercel-style function.
+
+## API
+
+| Method | Path | |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness |
+| `GET` | `/documents` | Indexed docs |
+| `POST` | `/upload` | `multipart/form-data` field `file` (PDF) |
+| `DELETE` | `/documents/{id}` | Drop a doc and rebuild the index from remaining chunks |
+| `POST` | `/ask` | `{ "question": "..." }` → `{ answer, sources[] }` |
+
+## Limitations
+
+- **Always returns `TOP_K=4` chunks.** Weak matches can still appear as
+  sources. A score cutoff belongs here next.
+- **No OCR.** Image-only PDFs raise 422.
+- **Delete rebuilds the whole index.** `IndexFlatIP` has no stable IDs;
+  re-embed is the correct small-N approach. A production index would delete
+  by key.
+- **Host disk is ephemeral** on typical PaaS. A new instance starts empty.
+- **`.env` is read at process start.** Changing a key requires a restart;
+  `--reload` does not watch `.env`.
+
+## Run locally
+
+Python 3.12+, Node 18+, Groq key: [console.groq.com/keys](https://console.groq.com/keys).
 
 ```bash
-# backend
 cd backend
 python -m venv venv
-.\venv\Scripts\Activate.ps1          # macOS/Linux: source venv/bin/activate
+# Windows: .\venv\Scripts\Activate.ps1
+# macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env               # macOS/Linux: cp .env.example .env
+cp .env.example .env   # Windows: copy .env.example .env
 ```
 
-Put the key in `backend/.env`:
+`backend/.env`:
 
 ```
 LLM_PROVIDER=groq
@@ -93,58 +117,37 @@ GROQ_MODEL=openai/gpt-oss-20b
 uvicorn main:app --reload --port 8000
 ```
 
-First run downloads the ONNX `all-MiniLM-L6-v2` model (~90MB) once.
+First start downloads the ONNX MiniLM weights once.
 
 ```bash
-# frontend — second terminal
 cd frontend
 npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. The Vite proxy forwards `/upload`, `/ask`, and
-`/documents` to the API.
+[http://localhost:5173](http://localhost:5173) — Vite proxies `/upload`,
+`/ask`, `/documents`, `/health` to port 8000.
 
-The server reads `.env` at startup — restart after changing a key.
+`LLM_PROVIDER=openai` is supported. The OpenAI **API** is billed separately
+from ChatGPT Plus.
 
-OpenAI also works (`LLM_PROVIDER=openai`) but the API is billed separately
-from ChatGPT Plus and a new key has no credits until you add them.
+## Deploy
 
-<br>
-
-## Using it
-
-1. Drop a **text** PDF on the upload zone (scanned image-only PDFs have no
-   text layer; pypdf cannot read those).
-2. Ask a question. Suggested prompts appear after a file is indexed.
-3. Click a numbered citation tab to see the source passage and page.
-4. Click **×** next to a document to drop it from the index.
-
-<br>
-
-## Host it
-
-One Docker image serves the built React app from FastAPI.
-
-**Render:** push to GitHub, create a Web Service from `render.yaml`, and set
-`GROQ_API_KEY`. The ONNX embedding runtime is intentionally lightweight enough
-to target Render's 512 MB free tier. Free services sleep after 15 idle minutes,
-so the first visit can take about a minute.
+Single image: Node build of the UI, FastAPI serves `frontend/dist`.
 
 ```bash
 docker build -t docmind .
 docker run -p 8000:8000 -e LLM_PROVIDER=groq -e GROQ_API_KEY=gsk_... docmind
 ```
 
-The FAISS index lives in `backend/data/`. Local restarts keep uploads.
-Ephemeral hosts (Render/Railway) start empty after a new instance — the
-managed analog is Azure AI Search.
+[`render.yaml`](render.yaml) targets Render’s free plan. Set `GROQ_API_KEY`
+in the dashboard. Free instances sleep after idle; the first request after
+sleep is slow.
 
-<br>
+## Layout
 
-## What I'd add with more time
-
-- Point the same `retrieve()` API at Azure AI Search
-- Score threshold so weak matches are not returned as “sources”
-- Streaming tokens instead of waiting for the full answer
-- Azure AI Document Intelligence for scanned / image PDFs
+```
+backend/rag.py      ingest, FAISS, BM25, RRF, generation
+backend/main.py     FastAPI + CORS + static UI in production
+frontend/src/App.jsx  upload, ask, citation UI
+```

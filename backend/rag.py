@@ -7,7 +7,7 @@ its managed-Azure counterpart with no change to the API surface:
     This project (free/local)        ->  Production (Azure)
     ---------------------------------------------------------------
     pypdf text extraction            ->  Azure AI Document Intelligence
-    sentence-transformers embeddings ->  Azure OpenAI text-embedding-3
+    FastEmbed ONNX (MiniLM)          ->  Azure OpenAI text-embedding-3
     FAISS + hybrid (vector + BM25)   ->  Azure AI Search (hybrid retrieval)
     OpenAI / Groq chat API           ->  Azure OpenAI GPT-4o
     FAISS + JSON on disk             ->  Azure SQL / Cosmos DB + Search index
